@@ -39,6 +39,9 @@ class TexturedMesh:
 
     _v_nrm: Optional[torch.FloatTensor] = None
     _v_tang: Optional[torch.FloatTensor] = None
+    
+    # material ID per vertex (for multi-mesh masking)
+    v_material_id: Optional[torch.FloatTensor] = None
 
     @property
     def v_nrm(self) -> torch.FloatTensor:
@@ -183,6 +186,8 @@ class TexturedMesh:
             self._v_nrm = self._v_nrm.to(device)
         if self._v_tang is not None:
             self._v_tang = self._v_tang.to(device)
+        if self.v_material_id is not None:
+            self.v_material_id = self.v_material_id.to(device)
 
 
 @contextmanager
@@ -208,7 +213,10 @@ def load_mesh(
     front_x_to_y: bool = False,
     device: Optional[str] = None,
     return_transform: bool = False,
+    return_individual_meshes: bool = False,
 ) -> TexturedMesh:
+    individual_mesh_list = []
+    
     if mesh_path.endswith(".npz"):
 
         class Mesh:
@@ -221,13 +229,46 @@ def load_mesh(
         mesh.faces = data["faces"]
         merge_vertices = False
     else:
-        scene = trimesh.load(mesh_path, force="mesh", process=False)
+        # Load as scene if we need individual meshes, otherwise as mesh
+        force_type = "scene" if return_individual_meshes else "mesh"
+        scene = trimesh.load(mesh_path, force=force_type, process=False)
         if isinstance(scene, trimesh.Trimesh):
             mesh = scene
+            if return_individual_meshes:
+                individual_mesh_list.append({
+                    'name': 'Mesh_0', 
+                    'mesh': scene,
+                    'transform': np.eye(4)
+                })
         elif isinstance(scene, trimesh.scene.Scene):
             mesh = trimesh.Trimesh()
-            for obj in scene.geometry.values():
-                mesh = trimesh.util.concatenate([mesh, obj])
+            for name, obj in scene.geometry.items():
+                # Get the transform for this mesh from the scene graph
+                transform = np.eye(4)
+                if hasattr(scene, 'graph') and scene.graph is not None:
+                    # Find the node that references this geometry
+                    for node_name in scene.graph.nodes_geometry:
+                        # Get the transform and geometry name for this node
+                        node_transform, geom_name = scene.graph.get(node_name)
+                        if geom_name == name:
+                            transform = node_transform
+                            break
+                
+                # Apply scene hierarchy transform to the geometry
+                # This matches what force="mesh" does automatically
+                transformed_obj = obj.copy()
+                transformed_obj.apply_transform(transform)
+                
+                if return_individual_meshes:
+                    # Store the transformed mesh (after scene hierarchy transform)
+                    individual_mesh_list.append({
+                        'name': name, 
+                        'mesh': transformed_obj,
+                        'transform': transform
+                    })
+                
+                # Concatenate the transformed mesh
+                mesh = trimesh.util.concatenate([mesh, transformed_obj])
         else:
             raise ValueError(f"Unknown mesh type at {mesh_path}.")
 
@@ -336,11 +377,37 @@ def load_mesh(
         )
     else:
         textured_mesh.set_stitched_mesh(textured_mesh.v_pos, textured_mesh.t_pos_idx)
+    
+    # Generate material IDs if individual meshes were loaded
+    if return_individual_meshes and len(individual_mesh_list) > 0:
+        vertex_material_ids = []
+        mesh_id_to_name = {}
+        
+        for mesh_idx, mesh_data in enumerate(individual_mesh_list):
+            # Assign unique integer ID (starting from 1, 0 is reserved for background)
+            mesh_id = mesh_idx + 1
+            mesh_id_to_name[mesh_id] = mesh_data['name']
+            
+            # Assign this ID to all vertices of this mesh
+            num_vertices = len(mesh_data['mesh'].vertices)
+            vertex_material_ids.extend([mesh_id] * num_vertices)
+        
+        # Store as integer tensor
+        textured_mesh.v_material_id = torch.tensor(
+            vertex_material_ids, dtype=torch.int32
+        )
+        
+        # Store the mesh ID to name mapping
+        textured_mesh.mesh_id_to_name = mesh_id_to_name
 
     textured_mesh.to(device)
 
-    if return_transform:
+    if return_transform and return_individual_meshes:
+        return textured_mesh, transform_offset, transform_scale, individual_mesh_list
+    elif return_transform:
         return textured_mesh, transform_offset, transform_scale
+    elif return_individual_meshes:
+        return textured_mesh, individual_mesh_list
     else:
         return textured_mesh
 

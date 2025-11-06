@@ -25,6 +25,7 @@ class RenderOutput:
     normal: Optional[torch.FloatTensor] = None
     tangent: Optional[torch.FloatTensor] = None
     pos: Optional[torch.FloatTensor] = None
+    material_id: Optional[torch.FloatTensor] = None
 
 
 class NVDiffRastContextWrapper:
@@ -227,6 +228,7 @@ def render(
     render_depth: bool = True,
     render_normal: bool = True,
     render_tangent: bool = False,
+    render_material_id: bool = False,
     depth_normalization_strategy: DepthNormalizationStrategy = DepthControlNetNormalization(),
     attr_background: Union[float, torch.FloatTensor] = 0.5,
     antialias_attr=False,
@@ -281,6 +283,24 @@ def render(
         gb_tang = F.normalize(gb_tang, dim=-1, p=2)
         gb_tang[~mask] = tangent_background
         output_dict["tangent"] = gb_tang
+    
+    if render_material_id and mesh.v_material_id is not None:
+        # Render material IDs per vertex
+        # Convert integer IDs to float for interpolation
+        v_mat_id_float = mesh.v_material_id.float()
+        v_mat_id_3ch = torch.stack([
+            v_mat_id_float,
+            v_mat_id_float,
+            v_mat_id_float
+        ], dim=-1)[None]  # Add batch dimension
+        gb_mat_id, _ = ctx.interpolate(v_mat_id_3ch, rast, mesh.t_pos_idx)
+        
+        # Round to nearest integer (converts interpolated floats back to discrete IDs)
+        gb_mat_id = torch.round(gb_mat_id)
+        
+        # Set background (non-masked pixels) to 0
+        gb_mat_id[~mask] = 0.0
+        output_dict["material_id"] = gb_mat_id
 
     return RenderOutput(**output_dict)
 

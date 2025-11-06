@@ -13,6 +13,7 @@ Pipeline:
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,56 +21,42 @@ import torch
 import trimesh
 from PIL import Image
 
+# Add parent directory to path for importing other scripts
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import existing pipeline functions
 from mvadapter.pipelines.pipeline_mvadapter_t2mv_sdxl import MVAdapterT2MVSDXLPipeline
 from mvadapter.pipelines.pipeline_mvadapter_i2mv_sdxl import MVAdapterI2MVSDXLPipeline
 from mvadapter.utils import make_image_grid
+from mvadapter.utils.mesh_utils import load_mesh
 
 
 def extract_individual_meshes(glb_path):
     """
-    Extract individual mesh objects from GLB file.
-    Returns both base geometry (for material ID) and transformed geometry (for export).
+    Extract individual mesh objects from GLB file using load_mesh.
+    This ensures consistency with the material ID logic in load_mesh().
     """
-    scene = trimesh.load(glb_path, force="scene", process=False)
+    # Use load_mesh to get individual meshes with scene hierarchy transforms applied
+    _, _, _, individual_meshes = load_mesh(
+        glb_path,
+        rescale=False,  # Don't rescale, just extract
+        move_to_center=False,
+        return_transform=True,
+        return_individual_meshes=True,
+        device="cpu"
+    )
     
-    individual_meshes = []
-    if isinstance(scene, trimesh.Scene):
-        # Scene contains multiple geometry objects
-        for name, geometry in scene.geometry.items():
-            if isinstance(geometry, trimesh.Trimesh):
-                # Get node transformation if it exists
-                nodes_with_geom = []
-                for node_name in scene.graph.nodes:
-                    node_data = scene.graph.transforms.node_data.get(node_name, {})
-                    if 'geometry' in node_data and name in node_data['geometry']:
-                        nodes_with_geom.append(node_name)
-                
-                # Create transformed version for export
-                transform = np.eye(4)
-                mesh_transformed = geometry.copy()
-                
-                if nodes_with_geom:
-                    node_name = nodes_with_geom[0]
-                    transform, _ = scene.graph[node_name]
-                    mesh_transformed.apply_transform(transform)
-                
-                individual_meshes.append({
-                    'name': name,
-                    'mesh': geometry,  # Base geometry for material ID
-                    'mesh_transformed': mesh_transformed,  # Transformed for export
-                    'transform': transform
-                })
-    elif isinstance(scene, trimesh.Trimesh):
-        # Single mesh
-        individual_meshes.append({
-            'name': 'Mesh_0',
-            'mesh': scene,
-            'mesh_transformed': scene.copy(),
-            'transform': np.eye(4)
+    # Format the output to include mesh_transformed for export
+    formatted_meshes = []
+    for mesh_data in individual_meshes:
+        formatted_meshes.append({
+            'name': mesh_data['name'],
+            'mesh': mesh_data['mesh'],  # Already has scene transforms applied
+            'mesh_transformed': mesh_data['mesh'],  # Same mesh (already transformed)
+            'transform': mesh_data['transform']
         })
     
-    return individual_meshes
+    return formatted_meshes
 
 
 def generate_full_scene_multiview(mesh_path, text, output_dir, args):
@@ -82,7 +69,7 @@ def generate_full_scene_multiview(mesh_path, text, output_dir, args):
     print("=" * 80)
     
     # Import the run_pipeline function from tg2mv_sdxl
-    from scripts.inference_tg2mv_sdxl import prepare_pipeline, run_pipeline
+    from inference_tg2mv_sdxl import prepare_pipeline, run_pipeline
     
     # Prepare pipeline
     pipe = prepare_pipeline(
@@ -232,7 +219,7 @@ def refine_individual_mesh(mesh_name, mesh_data, partial_view_path, text, output
         print(f"  ✓ Exported mesh GLB: {safe_name}.glb")
     
     # Import the refinement pipeline
-    from scripts.inference_ig2mv_partial_sdxl import prepare_pipeline, run_pipeline
+    from inference_ig2mv_partial_sdxl import prepare_pipeline, run_pipeline
     
     # Prepare pipeline
     pipe = prepare_pipeline(

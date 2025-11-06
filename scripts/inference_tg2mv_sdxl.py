@@ -1,8 +1,7 @@
 import argparse
+import os
 
-import numpy as np
 import torch
-import trimesh
 from diffusers import AutoencoderKL, DDPMScheduler, LCMScheduler, UNet2DConditionModel
 
 from mvadapter.models.attention_processor import DecoupledMVRowColSelfAttnProcessor2_0
@@ -10,30 +9,8 @@ from mvadapter.pipelines.pipeline_mvadapter_t2mv_sdxl import MVAdapterT2MVSDXLPi
 from mvadapter.schedulers.scheduling_shift_snr import ShiftSNRScheduler
 from mvadapter.utils import get_orthogonal_camera, make_image_grid, tensor_to_image
 from mvadapter.utils.mesh_utils import NVDiffRastContextWrapper, load_mesh, render
-from mvadapter.utils.mesh_utils.render import get_clip_space_position
 
 
-def extract_individual_meshes(glb_path):
-    """Extract individual mesh objects from GLB file."""
-    scene = trimesh.load(glb_path, force="scene", process=False)
-    
-    individual_meshes = []
-    if isinstance(scene, trimesh.Scene):
-        # Scene contains multiple geometry objects
-        for name, geometry in scene.geometry.items():
-            if isinstance(geometry, trimesh.Trimesh):
-                individual_meshes.append({
-                    'name': name,
-                    'mesh': geometry
-                })
-    elif isinstance(scene, trimesh.Trimesh):
-        # Single mesh
-        individual_meshes.append({
-            'name': 'Mesh_0',
-            'mesh': scene
-        })
-    
-    return individual_meshes
 
 
 def prepare_pipeline(
@@ -120,8 +97,9 @@ def run_pipeline(
     ctx = NVDiffRastContextWrapper(device=device, context_type="cuda")
 
     # Load full mesh for main rendering and get transformation parameters
-    mesh, transform_offset, transform_scale = load_mesh(
-        mesh_path, rescale=True, device=device, return_transform=True
+    mesh, transform_offset, transform_scale, individual_mesh_objects = load_mesh(
+        mesh_path, rescale=True, move_to_center=True, device=device, 
+        return_transform=True, return_individual_meshes=True
     )
     render_out = render(
         ctx,
@@ -170,84 +148,41 @@ def run_pipeline(
         **pipe_kwargs,
     ).images
 
-    # Extract individual meshes and use MATERIAL ID approach
-    individual_mesh_objects = extract_individual_meshes(mesh_path)
+    # Render individual mesh masks using material IDs
     individual_masks = {}
     
-    print(f"\nRendering individual masks for {len(individual_mesh_objects)} meshes...")
-    
-    # Replicate load_mesh concatenation logic: concatenate first, then transform
-    combined_trimesh = trimesh.Trimesh()
-    vertex_to_mesh_id = []
-    
-    mesh_id_to_name = {}
-    num_meshes = len(individual_mesh_objects)
-    
-    for mesh_idx, mesh_data in enumerate(individual_mesh_objects):
-        mesh_name = mesh_data['name']
-        trimesh_obj = mesh_data['mesh']
+    if mesh.v_material_id is not None and hasattr(mesh, 'mesh_id_to_name'):
+        print(f"\nRendering individual masks for {len(individual_mesh_objects)} meshes...")
         
-        # Assign unique ID (0-1 normalized)
-        mesh_id = (mesh_idx + 1) / (num_meshes + 1)  # e.g., 0.33, 0.67 for 2 meshes
-        mesh_id_to_name[mesh_id] = mesh_name
+        # Render material IDs using the render() function
+        id_render_out = render(
+            ctx,
+            mesh,
+            cameras,
+            height=height,
+            width=width,
+            render_attr=False,
+            render_depth=False,
+            render_normal=False,
+            render_material_id=True,
+        )
         
-        # Track which mesh each vertex belongs to
-        num_vertices = len(trimesh_obj.vertices)
-        vertex_to_mesh_id.extend([mesh_id] * num_vertices)
-        
-        # Concatenate (same as load_mesh does)
-        combined_trimesh = trimesh.util.concatenate([combined_trimesh, trimesh_obj])
-    
-    # Apply same transformations as load_mesh
-    vertices = combined_trimesh.vertices.copy()
-    if transform_offset is not None:
-        offset = transform_offset.cpu().numpy() if hasattr(transform_offset, 'cpu') else transform_offset
-        vertices = vertices - offset
-    if transform_scale is not None:
-        scale_val = transform_scale.item() if hasattr(transform_scale, 'item') else transform_scale
-        max_scale = scale_val * 0.5
-        vertices = vertices / max_scale * 0.5
-    
-    # Create vertex colors for material IDs
-    vertex_to_mesh_id = np.array(vertex_to_mesh_id, dtype=np.float32)
-    vertex_colors = np.column_stack([vertex_to_mesh_id, vertex_to_mesh_id, vertex_to_mesh_id])
-    
-    try:
-        # Convert to torch tensors
-        v_pos_torch = torch.from_numpy(vertices).float().to(device)
-        t_pos_idx_torch = torch.from_numpy(combined_trimesh.faces).long().to(device)
-        vertex_colors_torch = torch.from_numpy(vertex_colors).float().to(device)
-        
-        # Rasterize and interpolate vertex attributes (material IDs)
-        v_pos_clip = get_clip_space_position(v_pos_torch, cameras.mvp_mtx)
-        rast, _ = ctx.rasterize(v_pos_clip, t_pos_idx_torch, (height, width), grad_db=True)
-        
-        # Expand vertex colors to match batch dimension
-        vertex_colors_batch = vertex_colors_torch[None].expand(rast.shape[0], -1, -1)
-        id_attr_interp, _ = ctx.interpolate(vertex_colors_batch, rast, t_pos_idx_torch)
-        
-        # Extract material ID map
-        material_id_map = id_attr_interp  # Shape: [num_views, height, width, 3]
-        
-        if material_id_map is not None and material_id_map.numel() > 0:
-            # Use first channel for material IDs
-            material_ids = material_id_map[..., 0]
+        if id_render_out.material_id is not None:
+            # Use first channel for material IDs (already rounded to integers)
+            material_ids = id_render_out.material_id[..., 0]
             
-            # Extract mask for each mesh by comparing IDs
-            tolerance = 0.15  # Account for interpolation precision
-            for mesh_id, mesh_name in mesh_id_to_name.items():
-                mesh_mask = torch.abs(material_ids - mesh_id) < tolerance
+            # Extract mask for each mesh using exact integer matching
+            # No tolerance needed since IDs are discrete integers
+            for mesh_id, mesh_name in mesh.mesh_id_to_name.items():
+                mesh_mask = (material_ids == mesh_id)
                 mask_images = tensor_to_image(mesh_mask.float(), batched=True)
                 individual_masks[mesh_name] = mask_images
                 print(f"  ✓ {mesh_name}: {mesh_mask.sum().item():,} pixels")
         else:
-            raise ValueError("Could not render material IDs")
-                
-    except Exception as e:
-        print(f"  ✗ Material ID approach failed: {e}")
-        # Fallback: use combined mask for all meshes
-        for mesh_data in individual_mesh_objects:
-            individual_masks[mesh_data['name']] = combined_mask_images
+            print(f"  ⚠️  Material ID rendering returned None")
+            # Fallback: use combined mask for all meshes
+            for mesh_data in individual_mesh_objects:
+                individual_masks[mesh_data['name']] = combined_mask_images
 
     return images, pos_images, normal_images, combined_mask_images, individual_masks
 
@@ -308,6 +243,11 @@ if __name__ == "__main__":
         lora_scale=args.lora_scale,
         device=args.device,
     )
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(args.output)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     
     # Save main outputs
     make_image_grid(images, rows=1).save(args.output)
