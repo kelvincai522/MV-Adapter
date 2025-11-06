@@ -3,7 +3,7 @@ import open3d as o3d
 import pymeshlab
 import torch
 import trimesh
-from pymeshlab import Percentage
+from pymeshlab import PercentageValue as Percentage
 
 
 ### Mesh Utils ###
