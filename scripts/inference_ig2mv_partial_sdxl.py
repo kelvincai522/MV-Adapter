@@ -145,7 +145,7 @@ def run_pipeline(
         azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
         device=device,
     )
-    ctx = NVDiffRastContextWrapper(device=device)
+    ctx = NVDiffRastContextWrapper(device=device, context_type="cuda")
 
     mesh, offset, scale = load_mesh(
         mesh_path,
