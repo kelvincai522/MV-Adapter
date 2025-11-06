@@ -59,9 +59,9 @@ class TexturePipelineOutput:
 class TexturePipeline:
     def __init__(self, upscaler_ckpt_path: str, inpaint_ckpt_path: str, device: str):
         self.device = device
-        self.ctx = NVDiffRastContextWrapper(device=self.device)
+        self.ctx = NVDiffRastContextWrapper(device=self.device, context_type="cuda")
         self.cam_proj = CameraProjection(
-            pb_backend="torch-cuda", bg_remover=None, device=self.device
+            pb_backend="torch-cuda", bg_remover=None, device=self.device, context_type="cuda"
         )
         if upscaler_ckpt_path is not None:
             self.upscaler = ModelLoader().load_from_file(upscaler_ckpt_path)
