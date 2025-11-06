@@ -16,6 +16,7 @@ timm
 kornia
 scikit-image
 sentencepiece
+jaxtyping
 git+https://github.com/NVlabs/nvdiffrast.git
 
 # new added for training
@@ -26,3 +27,4 @@ spandrel==0.4.1
 open3d
 pymeshlab
 cvcuda_cu12
+gltflib
