@@ -91,7 +91,7 @@ def run_pipeline(
         azimuth_deg=[x - 90 for x in [0, 90, 180, 270, 180, 180]],
         device=device,
     )
-    ctx = NVDiffRastContextWrapper(device=device)
+    ctx = NVDiffRastContextWrapper(device=device, context_type="cuda")
 
     mesh = load_mesh(mesh_path, rescale=True, device=device)
     render_out = render(
@@ -105,8 +105,10 @@ def run_pipeline(
     )
     pos_images = tensor_to_image((render_out.pos + 0.5).clamp(0, 1), batched=True)
     normal_images = tensor_to_image(
-        (render_out.normal / 2 + 0.5).clamp(0, 1), batched=True
-    )
+        (render_out.normal / 2 + 0.5).clamp(0, 1), batched=True)
+    # Extract mask: convert to binary mask where alpha > 0
+    mask_images = tensor_to_image(render_out.mask, batched=True)
+    
     control_images = (
         torch.cat(
             [
@@ -137,7 +139,7 @@ def run_pipeline(
         **pipe_kwargs,
     ).images
 
-    return images, pos_images, normal_images
+    return images, pos_images, normal_images, mask_images
 
 
 if __name__ == "__main__":
@@ -182,7 +184,7 @@ if __name__ == "__main__":
         device=args.device,
         dtype=torch.float16,
     )
-    images, pos_images, normal_images = run_pipeline(
+    images, pos_images, normal_images, mask_images = run_pipeline(
         pipe,
         mesh_path=args.mesh,
         num_views=args.num_views,
@@ -200,4 +202,7 @@ if __name__ == "__main__":
     make_image_grid(pos_images, rows=1).save(args.output.rsplit(".", 1)[0] + "_pos.png")
     make_image_grid(normal_images, rows=1).save(
         args.output.rsplit(".", 1)[0] + "_nor.png"
+    )
+    make_image_grid(mask_images, rows=1).save(
+        args.output.rsplit(".", 1)[0] + "_mask.png"
     )
